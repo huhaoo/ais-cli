@@ -12,7 +12,7 @@
 需要 Python ≥ 3.10（3.11+ 用标准库 `tomllib`，3.10 自动回退到 `tomli`）。
 
 ```bash
-git clone https://github.com/USERNAME/ais-cli.git   # USERNAME 替换为实际用户名
+git clone https://github.com/huhaoo/ais-cli.git
 cd ais-cli
 pipx install .          # 推荐；或 uv tool install .
 # 本地开发安装
