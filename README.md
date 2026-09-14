@@ -131,6 +131,35 @@ exec bash                   # 或重开终端（zsh 需已启用 compinit）
 - `AIS_HOME`：把整个"home"重定向到别处（live 配置与 `~/.config/ais` 都随之移动）。
   主要给测试用，正常使用不需要。
 
+## Seafile 同步（可选）
+
+把 provider profiles 打包成**带密码的 AES zip**，通过 Seafile Web API 上传/下载。
+适合多台机器共用一套 profile。
+
+```bash
+ais sync setup          # 首次：输入 Seafile URL、API token、密码
+ais sync push           # 压缩本地 profiles 并上传
+ais sync pull           # 下载、解密并替换本地 profiles（会先确认）
+ais sync status         # 查看同步配置；--remote 加看远端文件信息
+ais sync passwd         # 改密码（自动用新密码重新加密存储的 token）
+```
+
+要点：
+
+- **首次输入**：URL、token、密码。之后每次只需输密码（脚本自动化可用
+  `AIS_SYNC_PASSWORD` 环境变量）。
+- **token 加密存储**：`~/.config/ais/sync.json` 里存的是用密码对称加密后的
+  token（AES），明文 token 不落盘；`sync.json` 本身永远不参与同步。
+- **只同步 profile**：压缩包只包含 `codex/` 和 `claude/` 下的 profile 目录。
+  `state.json`、`baseline/`、`backups/`、`sync.json` 都是机器本地文件，不上传。
+- **加密格式**：标准 AES zip（WZ_AES）。即使不用 ais，也能用 `7z x -p<密码>`
+  手工解开压缩包恢复文件。
+- **同步语义**：last-writer-wins。`pull` 会**整体替换**本地两个 profile 目录
+  （不是合并），执行前会显示将写入的 profile 并要求确认（`--yes` 跳过）。
+  下载的内容解密后逐文件校验（TOML/JSON），任何文件非法则整体放弃，本地不动；
+  压缩包内的路径穿越（`../`）成员会被拒绝。
+- 修改 URL / token：重跑 `ais sync setup`；改密码：`ais sync passwd`。
+
 ## 开发
 
 ```bash

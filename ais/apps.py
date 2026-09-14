@@ -28,11 +28,11 @@ _TOML_STRING_VALUE = re.compile(
 _TABLE_HEADER = re.compile(r"(?m)^\s*\[")
 
 
-def _validate_toml(text: str) -> None:
+def validate_toml(text: str) -> None:
     tomllib.loads(text)
 
 
-def _validate_json(text: str) -> None:
+def validate_json(text: str) -> None:
     json.loads(text)
 
 
@@ -116,7 +116,7 @@ CODEX = App(
     live_dir_name=".codex",
     live_file="config.toml",
     binary="codex",
-    validate=_validate_toml,
+    validate=validate_toml,
     auth_files=("auth.json",),
     prepare_use=codex_prepare_use,
     post_save=codex_post_save,
@@ -127,7 +127,7 @@ CLAUDE = App(
     live_dir_name=".claude",
     live_file="settings.json",
     binary="claude",
-    validate=_validate_json,
+    validate=validate_json,
     auth_files=(".credentials.json",),
     prepare_use=_identity_prepare,
     post_save=_no_post_save,

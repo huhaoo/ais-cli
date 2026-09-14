@@ -99,18 +99,22 @@ def sha256_file(path: Path) -> str:
 
 # ---------------------------------------------------------------- writing
 
-def atomic_write(path: Path, data: str) -> None:
-    """Write data to path via a temp file + fsync + atomic rename."""
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write bytes to path via a temp file + fsync + atomic rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(tmp, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def atomic_write(path: Path, data: str) -> None:
+    atomic_write_bytes(path, data.encode("utf-8"))
 
 
 def backup_live(home: Path, app: App) -> Optional[Path]:

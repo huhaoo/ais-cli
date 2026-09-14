@@ -10,6 +10,7 @@ import subprocess
 import typer
 
 from . import __version__, core
+from . import sync as sync_mod
 from .apps import APPS_ORDER
 from .core import App
 
@@ -375,6 +376,109 @@ def _make_subapp(a: App) -> typer.Typer:
 for _a in APPS_ORDER:
     app.add_typer(_make_subapp(_a), name=_a.name,
                   help=f"Manage {_a.name} provider profiles.")
+
+
+# ---------------------------------------------------------------- sync commands
+
+def _ask_password(confirm: bool = False) -> str:
+    pw = os.environ.get("AIS_SYNC_PASSWORD")
+    if pw is not None:
+        return pw
+    return typer.prompt("Sync password", hide_input=True,
+                        confirmation_prompt=confirm)
+
+
+sync_t = typer.Typer(help="Sync provider profiles via Seafile "
+                          "(password-encrypted zip).",
+                     no_args_is_help=True)
+
+
+@sync_t.command("setup")
+def sync_setup_cmd(
+    url: str = typer.Option("", "--url", help="Seafile server URL "
+                          "(e.g. https://seafile.example.com)."),
+    token: str = typer.Option("", "--token", help="Seafile API token."),
+    repo: str = typer.Option("", "--repo", help="Seafile library name."),
+) -> None:
+    """First-time setup: read URL/token/password, store token encrypted."""
+    home = core.get_home()
+    url = url or typer.prompt("Seafile server URL").strip()
+    token = token or typer.prompt("Seafile API token", hide_input=True).strip()
+    repo = repo or typer.prompt("Seafile library name",
+                                default=sync_mod.REPO_NAME_DEFAULT)
+    password = _ask_password(confirm=True)
+    cfg = sync_mod.setup(home, url, token, repo, password)
+    typer.echo(f"sync configured: {cfg['url']} library '{cfg['repo_name']}' "
+               f"-> {cfg['remote_path']}")
+    typer.echo(f"API token stored encrypted with your password in "
+               f"{sync_mod.sync_config_path(home)} (this file is never synced)")
+
+
+@sync_t.command("push")
+def sync_push_cmd(
+    force: bool = typer.Option(False, "--force", help="Allow pushing an "
+                               "empty profile set."),
+) -> None:
+    """Compress local profiles (password) and upload to Seafile."""
+    home = core.get_home()
+    typer.echo(sync_mod.push(home, _ask_password(), force=force))
+
+
+@sync_t.command("pull")
+def sync_pull_cmd(
+    yes: bool = typer.Option(False, "--yes", help="Replace local profiles "
+                             "without asking."),
+) -> None:
+    """Download from Seafile, decrypt and replace local profiles."""
+
+    def _confirm(files: dict) -> bool:
+        typer.echo(sync_mod._profile_summary(files))
+        return typer.confirm("Replace local codex/ and claude/ profiles with "
+                             "the downloaded set?", default=False)
+
+    home = core.get_home()
+    typer.echo(sync_mod.pull(home, _ask_password(), yes=yes, confirm=_confirm))
+
+
+@sync_t.command("status")
+def sync_status_cmd(
+    remote: bool = typer.Option(False, "--remote", help="Also fetch remote "
+                                "archive info (needs password)."),
+) -> None:
+    """Show sync configuration and, optionally, the remote archive."""
+    home = core.get_home()
+    try:
+        cfg = sync_mod.load_sync_config(home)
+    except core.AisError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    typer.echo(f"server: {cfg['url']}")
+    typer.echo(f"library: {cfg['repo_name']} ({cfg['repo_id']})")
+    typer.echo(f"remote file: {cfg.get('remote_path', sync_mod.REMOTE_PATH_DEFAULT)}")
+    typer.echo("token: stored encrypted with your sync password")
+    if remote:
+        detail = sync_mod.remote_status(home, _ask_password())
+        if detail is None:
+            typer.echo("remote archive: not uploaded yet")
+        else:
+            from datetime import datetime
+            mtime = datetime.fromtimestamp(detail.get("mtime", 0))
+            typer.echo(f"remote archive: {detail.get('size', '?')} bytes, "
+                       f"last modified {mtime:%Y-%m-%d %H:%M:%S}")
+
+
+@sync_t.command("passwd")
+def sync_passwd_cmd() -> None:
+    """Change the sync password (re-encrypts the stored token)."""
+    home = core.get_home()
+    old = _ask_password()
+    new = _ask_password(confirm=True)
+    sync_mod.change_password(home, old, new)
+    typer.echo("sync password changed; token re-encrypted")
+
+
+app.add_typer(sync_t, name="sync",
+              help="Sync profiles via Seafile (password-encrypted zip).")
 
 
 # ---------------------------------------------------------------- generic commands
