@@ -1,0 +1,9 @@
+#compdef ais
+# ais zsh completion (fpath style). Install:
+#   mkdir -p ~/.zfunc && cp completions/_ais ~/.zfunc/
+#   # then in ~/.zshrc, before compinit runs (oh-my-zsh runs it):
+#   fpath=(~/.zfunc $fpath)
+#
+# _TYPER_COMPLETE_ARGS must carry the words typed so far: without it ais
+# sees an empty command line and only ever completes top-level commands.
+eval $(env _TYPER_COMPLETE_ARGS="${words[1,$CURRENT]}" _AIS_COMPLETE=complete_zsh ais)

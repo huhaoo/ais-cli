@@ -69,6 +69,16 @@ ais --install-completion    # 自动识别 bash/zsh/fish，写入 shell 配置
 exec bash                   # 或重开终端（zsh 需已启用 compinit）
 ```
 
+zsh 如果用 `~/.zfunc` + fpath 的方式管理补全（fpath 必须在 compinit 之前加，oh-my-zsh 用户尤其注意），直接用仓库自带的脚本：
+
+```zsh
+mkdir -p ~/.zfunc && cp completions/_ais ~/.zfunc/
+# ~/.zshrc 中、compinit/oh-my-zsh 之前：
+fpath=(~/.zfunc $fpath)
+```
+
+脚本里的 `_TYPER_COMPLETE_ARGS="${words[1,$CURRENT]}"` 不能省：Typer 的补全协议靠它知道你已经输入到哪一级，缺了它 `ais` 每次都当作在补全空命令行，`ais codex <TAB>` 就只会重复列出一级命令。
+
 之后：
 
 - `ais <TAB>` → 列出 codex / claude / status / doctor / validate / backup
