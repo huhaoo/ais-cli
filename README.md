@@ -50,7 +50,7 @@ ais claude official
 | `ais codex\|claude list` | 列出 profile（当前项带标记） |
 | `ais codex\|claude current` | 当前生效的 profile；手动改过会显示 `(modified)`，文件没了显示 `(missing)`，未被 ais 管理显示 `unmanaged` |
 | `ais codex\|claude use <p>` | 切换到 profile（`use official` = 回官方） |
-| `ais codex\|claude save <p> [--force]` | 把当前 live 配置存成 profile；已存在默认拒绝覆盖 |
+| `ais codex\|claude save <p> [--force]` | 把当前 live 配置存成 profile；已存在默认拒绝覆盖；permissions / 目录信任等本地键不入 profile |
 | `ais codex\|claude delete <p> [--force]` | 删除 profile（正在使用时需 `--force`） |
 | `ais codex\|claude show <p>` | 打印 profile 内容 |
 | `ais codex\|claude clear` | 删除 live 配置（先备份），回到官方登录 |
@@ -148,6 +148,21 @@ ais attribution on     # 重新开启（默认）
   署名；开关为 off 时彻底删除 live 配置，App 完全回到自身默认。
 - 注入在内存中完成，写盘前同样经过 TOML / JSON 校验，失败即拒绝切换。
 
+## 本地设置不入 profile
+
+有些键描述的是**这台机器**而不是 provider：Claude Code 的 `permissions`
+（allow / deny / ask 规则、`defaultMode`、`additionalDirectories` 允许目录）与
+Codex 的 `[projects]`（目录信任）。它们随日常使用不断累积、只在本地有意义，
+ais 对它们只做保留、从不搬运：
+
+- `save`：这些键从 profile 中剥离（存盘时有提示）
+- `use` / `run`：profile 里的同名键一律丢弃，**沿用当前 live 配置里已有的**
+  （此前没有 live 配置则置空）；切换输出会说明保留了哪些
+- `clear` / `official`：provider 覆盖照常移除，本地键原样留在 live 配置里；
+  只有在隐藏署名关闭、且没有任何本地键时，live 配置才会被彻底删除
+- live 配置只剩隐藏键 / 本地键（official 状态）时，`save` 直接拒绝——没有
+  provider 内容可存，也不会因此覆盖已有 profile
+
 ## 安全模型
 
 - 修改 live 配置（`~/.codex/config.toml`、`~/.claude/settings.json`）前必先备份到
@@ -155,8 +170,9 @@ ais attribution on     # 重新开启（默认）
   「隐藏 AI 署名」的注入也发生在校验之前的内存里，产出非法内容同样拒绝写盘。
 - `clear` / `official` 的语义固定为"回到官方登录"：删除 ais 管理的 provider 覆盖
   （删除前必有备份），官方登录凭据接管；不存在 baseline，也没有"恢复接管前配置"
-  的行为。「隐藏 AI 署名」开启时，删除后会写入一份仅含隐藏键的最小 live 配置，
-  除此之外不含任何 provider 设置。
+  的行为。「隐藏 AI 署名」开启时，删除后会写入一份仅含隐藏键与本机本地键
+  （permissions / 目录信任）的最小 live 配置；关闭时若还有本地键也仅保留它们，
+  否则彻底删除。无论哪种写法都不含任何 provider 设置。
 - `clear` / `official` 不会删除或修改任何官方登录文件。
 - API key 按设计明文保存在 profile 里——所以 `~/.config/ais` 别放进公开仓库；
   想版本管理可以 `git init` 后用私有 remote。
@@ -234,7 +250,7 @@ OpenAI 的 `input_tokens` 是含缓存的总量（统计时已扣除，避免重
 ## 开发
 
 ```bash
-python3 -m pytest tests/ -q     # 72 个用例，无需真实 codex/claude
+python3 -m pytest tests/ -q     # 80 个用例，无需真实 codex/claude
 ```
 
 实现共三个模块：`ais/core.py`（路径 / 原子写 / 备份 / state）、

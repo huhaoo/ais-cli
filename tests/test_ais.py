@@ -141,28 +141,31 @@ def test_save_codex_keeps_original_catalog_path_when_missing(home):
         == "/nonexistent/models.json"
 
 
-def test_save_claude_preserves_unknown_fields(home):
+def test_save_claude_preserves_unknown_fields_except_local(home):
     live = home / ".claude" / "settings.json"
     live.write_text(CLAUDE_SETTINGS)
     r = run("claude", "save", "work")
     assert r.exit_code == 0, r.output
-    saved = home / ".config" / "ais" / "claude" / "work" / "settings.json"
-    assert saved.read_text() == CLAUDE_SETTINGS  # byte-identical
+    saved = json.loads((home / ".config" / "ais" / "claude" / "work" / "settings.json").read_text())
+    expected = json.loads(CLAUDE_SETTINGS)
+    del expected["permissions"]  # machine-local, never saved into profiles
+    assert saved == expected
+    assert "not saved into the profile" in r.output
     assert not (home / ".config" / "ais" / "claude" / "work" / ".credentials.json").exists()
 
 
 def test_save_refuses_overwrite_without_force(home):
     (home / ".claude" / "settings.json").write_text(CLAUDE_SETTINGS)
     assert run("claude", "save", "work").exit_code == 0
+    saved = home / ".config" / "ais" / "claude" / "work" / "settings.json"
+    first = saved.read_text()
     (home / ".claude" / "settings.json").write_text('{"env": {}}\n')
     r = run("claude", "save", "work")
     assert r.exit_code != 0
-    assert (home / ".config" / "ais" / "claude" / "work" / "settings.json").read_text() \
-        == CLAUDE_SETTINGS  # unchanged
+    assert saved.read_text() == first  # unchanged
     r = run("claude", "save", "work", "--force")
     assert r.exit_code == 0
-    assert (home / ".config" / "ais" / "claude" / "work" / "settings.json").read_text() \
-        == '{"env": {}}\n'
+    assert saved.read_text() == '{"env": {}}\n'
 
 
 def test_save_requires_live_config(home):
@@ -202,19 +205,24 @@ def test_use_claude_preserves_fields_and_hides_attribution(home):
     assert r.exit_code == 0, r.output
     live = json.loads((home / ".claude" / "settings.json").read_text())
     expected = json.loads(CLAUDE_SETTINGS)
+    del expected["permissions"]  # local-only; no prior live config to merge from
     expected["includeCoAuthoredBy"] = False
     expected["attribution"] = {"commit": ""}
     assert live == expected
     assert "hiding AI commit attribution" in r.output
+    assert "dropped permissions" in r.output
     assert "p1" in run("claude", "current").output
 
 
-def test_use_claude_verbatim_when_attribution_off(home):
+def test_use_claude_attribution_off_writes_profile_only(home):
     make_claude_profile(home, "p1")
     assert run("attribution", "off").exit_code == 0
     r = run("claude", "use", "p1")
     assert r.exit_code == 0, r.output
-    assert (home / ".claude" / "settings.json").read_text() == CLAUDE_SETTINGS
+    live = json.loads((home / ".claude" / "settings.json").read_text())
+    expected = json.loads(CLAUDE_SETTINGS)
+    del expected["permissions"]
+    assert live == expected
     assert "hiding AI commit attribution" not in r.output
 
 
@@ -304,7 +312,9 @@ def test_save_strips_injected_attribution(home):
     assert run("claude", "use", "src").exit_code == 0
     assert run("claude", "save", "clean").exit_code == 0
     saved = json.loads((home / ".config" / "ais" / "claude" / "clean" / "settings.json").read_text())
-    assert saved == json.loads(CLAUDE_SETTINGS)
+    expected = json.loads(CLAUDE_SETTINGS)
+    del expected["permissions"]
+    assert saved == expected
     assert "includeCoAuthoredBy" not in saved and "attribution" not in saved
 
 
@@ -329,6 +339,153 @@ def test_doctor_catches_broken_settings_json(home):
     (sdir / "settings.json").write_text("{broken")
     assert run("doctor").exit_code == 1
     assert "settings.json" in run("validate").output
+
+
+# ------------------------------------------------------------------ local-only keys
+
+def test_use_claude_keeps_live_permissions(home):
+    make_claude_profile(home, "p1")
+    live = home / ".claude" / "settings.json"
+    live.write_text(json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}}, indent=2))
+    r = run("claude", "use", "p1")
+    assert r.exit_code == 0, r.output
+    out = json.loads(live.read_text())
+    assert out["permissions"] == {"allow": ["Bash(ls:*)"]}
+    assert out["includeCoAuthoredBy"] is False
+    assert "kept local permissions" in r.output
+
+    # the live copy always wins, even against a profile carrying its own
+    live.write_text(json.dumps({
+        "env": {"ANTHROPIC_BASE_URL": "old"},
+        "permissions": {"allow": ["Bash(git:*)"], "additionalDirectories": ["/data"]},
+    }, indent=2))
+    pd = home / ".config" / "ais" / "claude" / "p1"
+    (pd / "settings.json").write_text(json.dumps({
+        "env": {"ANTHROPIC_BASE_URL": "new"},
+        "permissions": {"allow": ["Bash(rm:*)"]},
+    }, indent=2))
+    r = run("claude", "use", "p1")
+    assert r.exit_code == 0, r.output
+    out = json.loads(live.read_text())
+    assert out["env"] == {"ANTHROPIC_BASE_URL": "new"}          # provider from profile
+    assert out["permissions"] == {"allow": ["Bash(git:*)"],     # local keys from live
+                                  "additionalDirectories": ["/data"]}
+
+
+def test_save_claude_strips_permissions(home):
+    live = home / ".claude" / "settings.json"
+    live.write_text(json.dumps({
+        "env": {"ANTHROPIC_BASE_URL": "https://example.com/api"},
+        "permissions": {"additionalDirectories": ["/data"], "allow": ["Bash(ls:*)"]},
+    }, indent=2))
+    r = run("claude", "save", "work")
+    assert r.exit_code == 0, r.output
+    saved = json.loads((home / ".config" / "ais" / "claude" / "work" / "settings.json").read_text())
+    assert saved == {"env": {"ANTHROPIC_BASE_URL": "https://example.com/api"}}
+    assert "not saved into the profile" in r.output
+
+
+def test_use_codex_keeps_projects_trust(home):
+    live = home / ".codex" / "config.toml"
+    live.write_text('model = "old"\n\n[projects."/ssd/work"]\ntrust_level = "trusted"\n'
+                    '\n[projects."/ssd/other dir"]\ntrust_level = "trusted"\n')
+    make_codex_profile(home, "p1", text='model = "new"\nmodel_provider = "x"\n')
+    r = run("codex", "use", "p1")
+    assert r.exit_code == 0, r.output
+    text = live.read_text()
+    parsed = tomllib.loads(text)
+    assert parsed["model"] == "new"                              # provider from profile
+    assert parsed["projects"] == {"/ssd/work": {"trust_level": "trusted"},
+                                  "/ssd/other dir": {"trust_level": "trusted"}}
+    assert parsed["features"]["commit_attribution_enabled"] is False
+    assert "kept local directory trust" in r.output
+
+
+def test_save_codex_strips_projects(home):
+    live = home / ".codex" / "config.toml"
+    live.write_text('model = "m"\n\n[projects."/a"]\ntrust_level = "trusted"\n'
+                    '\n[projects."/b"]\ntrust_level = "trusted"\n')
+    r = run("codex", "save", "work")
+    assert r.exit_code == 0, r.output
+    saved = (home / ".config" / "ais" / "codex" / "work" / "config.toml").read_text()
+    assert tomllib.loads(saved) == {"model": "m"}
+    assert "projects" not in saved
+    assert "not saved into the profile" in r.output
+
+
+def test_use_drops_profile_projects_when_no_prior_live(home):
+    make_codex_profile(home, "p1", text='model = "m"\n\n[projects."/x"]\ntrust_level = "trusted"\n')
+    r = run("codex", "use", "p1")
+    assert r.exit_code == 0, r.output
+    parsed = tomllib.loads((home / ".codex" / "config.toml").read_text())
+    assert "projects" not in parsed
+    assert "dropped directory trust" in r.output
+
+
+def test_clear_keeps_local_keys(home):
+    live = home / ".codex" / "config.toml"
+    make_codex_profile(home, "p1", text='model = "m"\n')
+    live.write_text('model = "old"\n\n[projects."/w"]\ntrust_level = "trusted"\n')
+
+    r = run("codex", "clear")  # attribution hiding on by default
+    assert r.exit_code == 0, r.output
+    parsed = tomllib.loads(live.read_text())
+    assert parsed == {"projects": {"/w": {"trust_level": "trusted"}},
+                      "features": {"commit_attribution_enabled": False}}
+    assert run("codex", "current").output.strip() == "official"
+    assert "kept local directory trust" in r.output
+
+    # hiding off: local keys still survive, now without the [features] key
+    assert run("codex", "use", "p1").exit_code == 0
+    run("attribution", "off")
+    r = run("codex", "clear")
+    assert r.exit_code == 0, r.output
+    assert tomllib.loads(live.read_text()) == {"projects": {"/w": {"trust_level": "trusted"}}}
+    assert run("codex", "current").output.strip() == "official"
+
+    # and with nothing local to keep, the file is gone
+    (home / ".config" / "ais" / "state.json").unlink()
+    live.unlink()
+    r = run("codex", "clear")
+    assert r.exit_code == 0, r.output
+    assert not live.exists()
+
+
+def test_clear_claude_keeps_permissions(home):
+    make_claude_profile(home, "p1")
+    (home / ".claude" / "settings.json").write_text(json.dumps(
+        {"env": {"ANTHROPIC_BASE_URL": "x"}, "permissions": {"allow": ["Bash(ls:*)"]}}))
+    r = run("claude", "clear")
+    assert r.exit_code == 0, r.output
+    out = json.loads((home / ".claude" / "settings.json").read_text())
+    assert out == {"permissions": {"allow": ["Bash(ls:*)"]},
+                   "includeCoAuthoredBy": False, "attribution": {"commit": ""}}
+    assert run("claude", "current").output.strip() == "official"
+
+
+def test_save_refuses_official_minimal_live_config(home):
+    make_codex_profile(home, "p1", text='model = "m"\n')
+    assert run("codex", "use", "p1").exit_code == 0
+    assert run("codex", "clear").exit_code == 0  # live is now the minimal hidden config
+
+    r = run("codex", "save", "oops")
+    assert r.exit_code != 0
+    assert "no provider settings to save" in r.output
+    assert not (home / ".config" / "ais" / "codex" / "oops").exists()
+
+    # --force must not destroy an existing profile either when refusing
+    make_codex_profile(home, "keep", text='model = "m"\n')
+    r = run("codex", "save", "keep", "--force")
+    assert r.exit_code != 0
+    assert (home / ".config" / "ais" / "codex" / "keep" / "config.toml").read_text() \
+        == 'model = "m"\n'
+
+    # claude: official state holding only permissions is also refused
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}}))
+    r = run("claude", "save", "oops")
+    assert r.exit_code != 0
+    assert not (home / ".config" / "ais" / "claude" / "oops").exists()
 
 
 # ------------------------------------------------------------------ clear / official

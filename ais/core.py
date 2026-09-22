@@ -42,6 +42,13 @@ class App:
     strip_attribution: Callable[[str], str]    # inverse; `save` stores profiles pure
     empty_content: str                         # valid empty live config; `clear`
                                                # writes hide_attribution(empty_content)
+    unmanaged_desc: str                        # human name of the machine-local keys
+    extract_unmanaged: Callable[[str], str]    # live text -> only-unmanaged text
+    strip_unmanaged: Callable[[str], str]      # drop the unmanaged keys entirely
+    merge_unmanaged: Callable[[str, str], str]  # (live text, content) -> content
+                                                # carrying the live config's keys
+    is_empty: Callable[[str], bool]            # true when no user content remains
+                                               # (used to refuse pointless saves)
 
 
 def get_home() -> Path:

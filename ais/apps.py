@@ -37,6 +37,31 @@ _ATTRIB_LINE_FALSE = re.compile(
     r"(?m)^[ \t]*" + ATTRIB_KEY + r"[ \t]*=[ \t]*false[ \t]*(?:#.*)?\r?\n?"
 )
 
+# Machine-local settings ais never manages: claude's `permissions` object
+# (allow/deny/ask rules, defaultMode, additionalDirectories) and codex's
+# `[projects]` directory-trust tables. They describe this machine's folders,
+# not a provider, so they never travel inside profiles: `save` strips them,
+# `use`/`clear` keep whatever the live config already has.
+CLAUDE_UNMANAGED_KEYS = ("permissions",)
+
+# Header pattern tolerates quoted key parts containing ']': [projects."/a]b"]
+_SECTION_HEADER = re.compile(
+    r"(?m)^[ \t]*\[((?:[^\]\"']|\"[^\"]*\"|'[^']*')+)\][ \t]*(#.*)?$"
+)
+
+
+def _codex_sections(text: str) -> "list[tuple[int, int, str]]":
+    """Spans (start, end, name) of each top-level TOML table section."""
+    matches = list(_SECTION_HEADER.finditer(text))
+    return [(m.start(),
+             matches[i + 1].start() if i + 1 < len(matches) else len(text),
+             m.group(1).strip())
+            for i, m in enumerate(matches)]
+
+
+def _is_projects(name: str) -> bool:
+    return name == "projects" or name.startswith("projects.")
+
 
 def validate_toml(text: str) -> None:
     tomllib.loads(text)
@@ -137,6 +162,88 @@ def codex_strip_attribution(text: str) -> str:
     return text[:header.end()] + new_section + tail
 
 
+def codex_extract_unmanaged(text: str) -> str:
+    """Concatenation of the ``[projects]`` table sections, verbatim ("" if none)."""
+    parts = [text[s:e].strip("\n") + "\n"
+             for s, e, name in _codex_sections(text) if _is_projects(name)]
+    return "\n".join(parts)
+
+
+def codex_strip_unmanaged(text: str) -> str:
+    """Remove every ``[projects]`` / ``[projects."…"]`` section, rest verbatim."""
+    spans = [(s, e) for s, e, name in _codex_sections(text) if _is_projects(name)]
+    if not spans:
+        return text
+    for s, e in reversed(spans):
+        text = text[:s] + text[e:]
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    body = text.rstrip("\n")
+    return body + "\n" if body else ""
+
+
+def codex_merge_unmanaged(live_text: str, content: str) -> str:
+    """Give content the live config's projects tables; profile copies never win."""
+    content = codex_strip_unmanaged(content)
+    extra = codex_extract_unmanaged(live_text)
+    if not extra:
+        return content
+    body = content.rstrip("\n")
+    return (body + "\n\n" if body else "") + extra
+
+
+def codex_is_empty(text: str) -> bool:
+    return not text.strip()
+
+
+def _claude_obj(text: str) -> "dict | None":
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _claude_dump(obj: dict) -> str:
+    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
+def claude_extract_unmanaged(text: str) -> str:
+    """JSON text holding only the unmanaged keys ("" if none present)."""
+    obj = _claude_obj(text)
+    if not obj:
+        return ""
+    kept = {k: obj[k] for k in CLAUDE_UNMANAGED_KEYS if k in obj}
+    return _claude_dump(kept) if kept else ""
+
+
+def claude_strip_unmanaged(text: str) -> str:
+    obj = _claude_obj(text)
+    if not obj or not any(k in obj for k in CLAUDE_UNMANAGED_KEYS):
+        return text
+    for k in CLAUDE_UNMANAGED_KEYS:
+        obj.pop(k, None)
+    return _claude_dump(obj)
+
+
+def claude_merge_unmanaged(live_text: str, content: str) -> str:
+    """Give content the live config's unmanaged keys; profile copies never win."""
+    src = _claude_obj(live_text) or {}
+    taken = {k: src[k] for k in CLAUDE_UNMANAGED_KEYS if k in src}
+    cobj = _claude_obj(content)
+    if cobj is None:
+        cobj = {}
+    if not taken and not any(k in cobj for k in CLAUDE_UNMANAGED_KEYS):
+        return content
+    for k in CLAUDE_UNMANAGED_KEYS:
+        cobj.pop(k, None)
+    cobj.update(taken)
+    return _claude_dump(cobj)
+
+
+def claude_is_empty(text: str) -> bool:
+    return not _claude_obj(text)  # unparsable counts as empty; callers validated first
+
+
 def claude_hide_attribution(text: str) -> str:
     """Hide Claude's commit attribution in settings.json content.
 
@@ -228,6 +335,11 @@ CODEX = App(
     hide_attribution=codex_hide_attribution,
     strip_attribution=codex_strip_attribution,
     empty_content="",
+    unmanaged_desc="directory trust ([projects] tables)",
+    extract_unmanaged=codex_extract_unmanaged,
+    strip_unmanaged=codex_strip_unmanaged,
+    merge_unmanaged=codex_merge_unmanaged,
+    is_empty=codex_is_empty,
 )
 
 CLAUDE = App(
@@ -242,6 +354,11 @@ CLAUDE = App(
     hide_attribution=claude_hide_attribution,
     strip_attribution=claude_strip_attribution,
     empty_content="{}",
+    unmanaged_desc="permissions (incl. additionalDirectories)",
+    extract_unmanaged=claude_extract_unmanaged,
+    strip_unmanaged=claude_strip_unmanaged,
+    merge_unmanaged=claude_merge_unmanaged,
+    is_empty=claude_is_empty,
 )
 
 APPS = {"codex": CODEX, "claude": CLAUDE}

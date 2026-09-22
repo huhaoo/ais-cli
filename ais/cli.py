@@ -67,6 +67,21 @@ def _cmd_use(a: App, profile: str) -> None:
     except Exception as e:
         _die(f"profile '{profile}' {a.live_file} is invalid, refusing to switch: {e}")
     content = a.prepare_use(pdir, content)
+
+    # machine-local keys (claude permissions, codex [projects] trust) are
+    # never taken from profiles: the live config's copies always win
+    live_text = None
+    lp = core.live_path(home, a)
+    if lp.is_file():
+        live_text = lp.read_text(encoding="utf-8")
+    if live_text is not None and a.extract_unmanaged(live_text):
+        content = a.merge_unmanaged(live_text, content)
+        typer.echo(f"note: kept local {a.unmanaged_desc} from the previous live config")
+    else:
+        if a.extract_unmanaged(content):
+            typer.echo(f"note: dropped {a.unmanaged_desc} from the profile (local-only)")
+        content = a.strip_unmanaged(content)
+
     if core.hide_ai_attribution(home):
         hidden = a.hide_attribution(content)
         if hidden != content:
@@ -93,10 +108,10 @@ def _cmd_save(a: App, profile: str, force: bool) -> None:
     home = core.get_home()
     core.check_name(profile)
     pdir = core.profile_dir(home, a, profile)
-    if pdir.exists():
-        if not force:
-            _die(f"profile '{profile}' already exists; use --force to overwrite")
-        shutil.rmtree(pdir)
+    if pdir.exists() and not force:
+        _die(f"profile '{profile}' already exists; use --force to overwrite")
+
+    # everything that can refuse the save happens before anything is touched
     live = core.live_path(home, a)
     if not live.is_file():
         _die(f"no live config to save at {live}")
@@ -106,11 +121,20 @@ def _cmd_save(a: App, profile: str, force: bool) -> None:
     except Exception as e:
         _die(f"live {a.live_file} is invalid, nothing saved: {e}")
     text = a.strip_attribution(text)  # profiles stay free of ais-injected keys
+    stripped = a.strip_unmanaged(text)
+    if stripped != text:
+        typer.echo(f"note: {a.unmanaged_desc} not saved into the profile (local-only)")
+        text = stripped
+    if a.is_empty(text):
+        _die(f"live {a.live_file} holds no provider settings to save "
+             f"(only AI-attribution / local-only keys); nothing saved")
     try:
         a.validate(text)
     except Exception as e:
         _die(f"stripped config for '{profile}' is invalid, nothing saved: {e}")
 
+    if pdir.exists():  # --force: only now is the old profile discarded
+        shutil.rmtree(pdir)
     pdir.mkdir(parents=True, exist_ok=True)
     core.atomic_write(pdir / a.live_file, text)
     for w in a.post_save(a, home, pdir):
@@ -122,29 +146,48 @@ def _cmd_save(a: App, profile: str, force: bool) -> None:
 def _cmd_clear(a: App) -> None:
     """Remove provider overrides so the app falls back to its official login.
 
-    With attribution hiding on (the default), a minimal live config holding
-    only the hide keys is written instead of deleting the file, so commits
-    stay attribution-free on the official login too.
+    Machine-local keys (claude permissions, codex [projects] trust) are kept
+    in the live config. With attribution hiding on (the default), a minimal
+    config holding the hide keys plus those local keys is written instead of
+    deleting the file, so commits stay attribution-free on the official
+    login too.
     """
     home = core.get_home()
     live = core.live_path(home, a)
     backup = core.backup_live(home, a)
 
-    hidden = None
+    preserved = ""
+    if live.is_file():
+        preserved = a.extract_unmanaged(live.read_text(encoding="utf-8"))
+
     if core.hide_ai_attribution(home):
-        hidden = a.hide_attribution(a.empty_content)
+        base = preserved if preserved.strip() else a.empty_content
+        content = a.hide_attribution(base)
         try:
-            a.validate(hidden)
+            a.validate(content)
         except Exception as e:
             _die(f"generated minimal config is invalid, refusing to write: {e}")
-
-    if hidden is not None:
-        core.atomic_write(live, hidden)
-        core.set_state(home, a, current=None, live_hash=core.sha256_text(hidden),
+        core.atomic_write(live, content)
+        core.set_state(home, a, current=None, live_hash=core.sha256_text(content),
                        official=True)
         typer.echo(f"{a.name}: provider overrides removed (official login takes over)")
         typer.echo(f"{a.name}: wrote minimal config hiding AI commit attribution "
                    f"at {live}")
+        if preserved.strip():
+            typer.echo(f"{a.name}: kept local {a.unmanaged_desc} from the "
+                       f"previous live config")
+    elif preserved.strip():
+        # hiding off, but the local keys are not ours to delete
+        try:
+            a.validate(preserved)
+        except Exception as e:
+            _die(f"preserved local keys are invalid, refusing to write: {e}")
+        core.atomic_write(live, preserved)
+        core.set_state(home, a, current=None, live_hash=core.sha256_text(preserved),
+                       official=True)
+        typer.echo(f"{a.name}: provider overrides removed (official login takes over)")
+        typer.echo(f"{a.name}: kept local {a.unmanaged_desc} at {live} "
+                   f"(AI attribution hiding is off)")
     else:
         if live.exists():
             live.unlink()
