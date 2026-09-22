@@ -11,6 +11,7 @@ import typer
 
 from . import __version__, core
 from . import sync as sync_mod
+from . import usage as usage_mod
 from .apps import APPS_ORDER
 from .core import App
 
@@ -45,7 +46,7 @@ def _complete_profiles(a: App):
         except Exception:
             names = []
         return [(n, "profile") for n in sorted(set(names))] + \
-               [("official", "restore baseline / official login")]
+               [("official", "remove overrides, use official login")]
     return complete
 
 
@@ -54,7 +55,7 @@ def _complete_profiles(a: App):
 def _cmd_use(a: App, profile: str) -> None:
     home = core.get_home()
     if profile == "official":
-        _cmd_clear(a, hard=False)
+        _cmd_clear(a)
         return
     core.check_name(profile)
     pdir = core.profile_dir(home, a, profile)
@@ -71,7 +72,6 @@ def _cmd_use(a: App, profile: str) -> None:
     except Exception as e:
         _die(f"generated config for '{profile}' is invalid, refusing to switch: {e}")
 
-    core.ensure_baseline(home, a)
     backup = core.backup_live(home, a)
     core.atomic_write(core.live_path(home, a), content)
     core.set_state(home, a, current=profile, live_hash=core.sha256_text(content))
@@ -108,39 +108,18 @@ def _cmd_save(a: App, profile: str, force: bool) -> None:
     typer.echo(f"official login files are never copied: {_auth_note(a)}")
 
 
-def _cmd_clear(a: App, hard: bool) -> None:
+def _cmd_clear(a: App) -> None:
+    """Remove the live config so the app falls back to its official login."""
     home = core.get_home()
     live = core.live_path(home, a)
-    core.ensure_baseline(home, a)
     backup = core.backup_live(home, a)
 
-    if hard:
-        if live.exists():
-            live.unlink()
-            typer.echo(f"{a.name}: removed {live} (--hard)")
-        else:
-            typer.echo(f"{a.name}: no live config at {live}")
-        core.set_state(home, a, current=None, live_hash=None, official=True)
+    if live.exists():
+        live.unlink()
+        typer.echo(f"{a.name}: removed {live} (official login takes over)")
     else:
-        try:
-            existed, content = core.read_baseline(home, a)
-        except (OSError, ValueError) as e:
-            _die(f"cannot read {a.name} baseline: {e}; "
-                 f"try 'ais {a.name} reset-baseline'")
-        if existed and content is not None:
-            try:
-                a.validate(content)
-            except Exception as e:
-                _die(f"baseline config is invalid, live config left untouched: {e}")
-            core.atomic_write(live, content)
-            core.set_state(home, a, current=None,
-                           live_hash=core.sha256_text(content), official=True)
-            typer.echo(f"{a.name}: restored pre-ais baseline config")
-        else:
-            if live.exists():
-                live.unlink()
-            core.set_state(home, a, current=None, live_hash=None, official=True)
-            typer.echo(f"{a.name}: baseline had no {a.live_file}; removed live config")
+        typer.echo(f"{a.name}: no live config at {live}")
+    core.set_state(home, a, current=None, live_hash=None, official=True)
 
     if backup:
         typer.echo(f"backup: {backup}")
@@ -150,7 +129,7 @@ def _cmd_clear(a: App, hard: bool) -> None:
 def _cmd_run(a: App, profile: str) -> None:
     home = core.get_home()
     if profile == "official":
-        _cmd_clear(a, hard=False)
+        _cmd_clear(a)
     else:
         _cmd_use(a, profile)
     env = dict(os.environ)
@@ -249,14 +228,6 @@ def _check_all(home) -> "list[str]":
             except Exception as e:
                 problems.append(f"live {a.name} config ({live}): {e}")
 
-        if core.baseline_captured(home, a):
-            try:
-                existed, content = core.read_baseline(home, a)
-                if existed and content is not None:
-                    a.validate(content)
-            except Exception as e:
-                problems.append(f"{a.name} baseline: {e}")
-
         for name in core.list_profiles(home, a):
             pdir = core.profile_dir(home, a, name)
             try:
@@ -336,18 +307,14 @@ def _make_subapp(a: App) -> typer.Typer:
         _cmd_show(a, profile)
 
     @t.command("clear")
-    def clear_cmd(
-        hard: bool = typer.Option(False, "--hard",
-                                  help="Delete the live config instead of restoring "
-                                       "the baseline."),
-    ) -> None:
-        """Remove provider overrides (restore the pre-ais baseline)."""
-        _cmd_clear(a, hard)
+    def clear_cmd() -> None:
+        """Remove provider overrides (back to the official login)."""
+        _cmd_clear(a)
 
     @t.command("official")
     def official_cmd() -> None:
         """Return to the official login/config (same as clear)."""
-        _cmd_clear(a, hard=False)
+        _cmd_clear(a)
 
     @t.command("run")
     def run_cmd(
@@ -363,12 +330,6 @@ def _make_subapp(a: App) -> typer.Typer:
     ) -> None:
         """Edit a profile's main config in $EDITOR."""
         _cmd_edit(a, profile)
-
-    @t.command("reset-baseline")
-    def reset_baseline_cmd() -> None:
-        """Re-capture the baseline from the current live config."""
-        core.reset_baseline(core.get_home(), a)
-        typer.echo(f"{a.name}: baseline reset from current live config")
 
     return t
 
@@ -481,6 +442,66 @@ app.add_typer(sync_t, name="sync",
               help="Sync profiles via Seafile (password-encrypted zip).")
 
 
+# ---------------------------------------------------------------- usage command
+
+@app.command("usage")
+def usage_cmd(
+    app_name: str = typer.Argument("", help="codex or claude (default: both)."),
+    days: int = typer.Option(0, "--days", min=0,
+                             help="Only count activity from the last N days."),
+    currency: str = typer.Option("cny", "--currency", "-c",
+                                 help="Cost currency: cny (default) or usd."),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Estimate token usage and cost from local Codex/Claude Code logs."""
+    home = core.get_home()
+    apps = [app_name] if app_name else ["codex", "claude"]
+    if any(a not in ("codex", "claude") for a in apps):
+        _die(f"unknown app {app_name!r}; expected 'codex' or 'claude'")
+    if currency.lower() not in ("cny", "usd"):
+        _die(f"unsupported currency {currency!r}; expected 'cny' or 'usd'")
+
+    reports = [usage_mod.report(home, a, days, currency) for a in apps]
+    if as_json:
+        typer.echo(json.dumps(reports, indent=2))
+        return
+
+    symbol = "¥" if reports[0]["currency"] == "CNY" else "$"
+    rate_note = ""
+    if reports[0]["currency"] == "CNY":
+        rate_note = f", converted at {reports[0]['usd_to_cny']} CNY/USD"
+
+    for r in reports:
+        span = f"last {r['days']} days" if r["days"] else "all time"
+        rate = f", 1 USD = {r['usd_to_cny']} CNY" if r["currency"] == "CNY" else ""
+        typer.echo(f"{r['app']} — usage by model ({span}{rate}), source: {r['source']}")
+        if not r["rows"]:
+            typer.echo("  no usage data found\n")
+            continue
+        header = f"  {'model':<24}{'input':>12}{'cache R':>12}{'cache W':>12}{'output':>12}{'cost':>13}"
+        typer.echo(header)
+        typer.echo("  " + "-" * (len(header) - 2))
+        for row in r["rows"]:
+            cost = f"{symbol}{row['cost']:,.2f}" if row["cost"] is not None else "—"
+            typer.echo(f"  {row['model'][:24]:<24}{row['input']:>12,}"
+                       f"{row['cached_input']:>12,}{row['cache_write']:>12,}"
+                       f"{row['output']:>12,}{cost:>13}")
+        total = f"{symbol}{r['total_cost']:,.2f}" if r["rows"] else ""
+        typer.echo("  " + "-" * (len(header) - 2))
+        typer.echo(f"  {'total':<24}"
+                   f"{sum(x['input'] for x in r['rows']):>12,}"
+                   f"{sum(x['cached_input'] for x in r['rows']):>12,}"
+                   f"{sum(x['cache_write'] for x in r['rows']):>12,}"
+                   f"{sum(x['output'] for x in r['rows']):>12,}"
+                   f"{total:>13}")
+        unpriced = r["priced_models"] < len(r["rows"])
+        note = f"costs are estimates at public list prices (updated {r['prices_updated']}"
+        note += f"{rate_note}, short context); edit ~/.config/ais/prices.json to override"
+        if unpriced:
+            note = f"models without public prices show '—' ({len(r['rows']) - r['priced_models']} unpriced). " + note
+        typer.echo(f"  ({note})\n")
+
+
 # ---------------------------------------------------------------- generic commands
 
 @app.command("status")
@@ -494,8 +515,6 @@ def status_cmd() -> None:
         typer.echo(f"  official auth: {core.auth_status(home, a)}")
         typer.echo(f"  profiles: {len(names)}"
                    + (f" ({', '.join(names)})" if names else ""))
-        typer.echo(f"  baseline: "
-                   f"{'captured' if core.baseline_captured(home, a) else 'not captured'}")
 
 
 @app.command("backup")

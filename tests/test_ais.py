@@ -126,8 +126,8 @@ def test_save_codex_with_models_json(home):
     assert cfg["model_catalog_json"] == "models.json"  # portable placeholder
     assert not (pd / "auth.json").exists()  # never copy official login
     assert live.read_text() == original  # live untouched
-    # save does not modify live config -> no baseline captured
-    assert not (home / ".config" / "ais" / "baseline" / "codex").exists()
+    # save does not modify live config
+    assert not (home / ".config" / "ais" / "backups" / "codex").exists()
 
 
 def test_save_codex_keeps_original_catalog_path_when_missing(home):
@@ -186,8 +186,6 @@ def test_use_codex_rewrites_catalog_to_profile_models(home):
     assert live["model_providers"]["custom"]["experimental_bearer_token"] == "sk-secret"
 
     assert "p1" in run("codex", "current").output
-    # baseline was captured (live config did not exist before)
-    assert (home / ".config" / "ais" / "baseline" / "codex" / "existed.json").is_file()
 
 
 def test_use_codex_without_models_json_leaves_paths_alone(home):
@@ -212,24 +210,7 @@ def test_use_unknown_profile_fails(home):
 
 # ------------------------------------------------------------------ clear / official
 
-def test_clear_restores_baseline_and_keeps_auth(home):
-    auth = home / ".codex" / "auth.json"
-    auth.write_text('{"tokens": "keep-me"}')
-    original = '# my own config\nmodel = "orig"\n'
-    (home / ".codex" / "config.toml").write_text(original)
-    make_codex_profile(home, "p1", with_models=True)
-
-    assert run("codex", "use", "p1").exit_code == 0
-    assert (home / ".codex" / "config.toml").read_text() != original
-
-    r = run("codex", "clear")
-    assert r.exit_code == 0, r.output
-    assert (home / ".codex" / "config.toml").read_text() == original
-    assert auth.read_text() == '{"tokens": "keep-me"}'
-    assert run("codex", "current").output.strip() == "official"
-
-
-def test_clear_deletes_live_config_when_baseline_absent(home):
+def test_clear_deletes_live_config_and_keeps_auth(home):
     auth = home / ".codex" / "auth.json"
     auth.write_text('{"tokens": "keep-me"}')
     make_codex_profile(home, "p1")
@@ -240,43 +221,36 @@ def test_clear_deletes_live_config_when_baseline_absent(home):
     assert r.exit_code == 0, r.output
     assert not (home / ".codex" / "config.toml").exists()
     assert auth.read_text() == '{"tokens": "keep-me"}'
+    assert run("codex", "current").output.strip() == "official"
+    # the removed config was backed up first
+    backups = list((home / ".config" / "ais" / "backups" / "codex").iterdir())
+    assert len(backups) == 1
 
 
-def test_clear_hard_deletes_live_config(home):
-    (home / ".claude" / "settings.json").write_text("{}\n")
-    make_claude_profile(home, "p1")
-    assert run("claude", "use", "p1").exit_code == 0
-    r = run("claude", "clear", "--hard")
-    assert r.exit_code == 0, r.output
-    assert not (home / ".claude" / "settings.json").exists()
-    assert run("claude", "current").output.strip() == "official"
+def test_clear_rejects_removed_hard_option(home):
+    assert run("codex", "clear", "--hard").exit_code != 0
 
 
-def test_official_command_equals_clear(home):
-    original = (home / ".codex" / "config.toml")
-    original.write_text('model = "orig"\n')
+def test_official_deletes_live_config(home):
+    live = home / ".codex" / "config.toml"
+    live.write_text('model = "orig"\n')
     make_codex_profile(home, "p1")
     assert run("codex", "use", "p1").exit_code == 0
 
     r = run("codex", "official")
     assert r.exit_code == 0, r.output
-    assert original.read_text() == 'model = "orig"\n'
+    assert not live.exists()
+    assert run("codex", "current").output.strip() == "official"
 
     # `use official` is the same thing
     assert run("codex", "use", "p1").exit_code == 0
     r = run("codex", "use", "official")
     assert r.exit_code == 0, r.output
-    assert original.read_text() == 'model = "orig"\n'
+    assert not live.exists()
 
 
-def test_reset_baseline(home):
-    (home / ".codex" / "config.toml").write_text('model = "v1"\n')
-    make_codex_profile(home, "p1")
-    assert run("codex", "use", "p1").exit_code == 0
-    (home / ".codex" / "config.toml").write_text('model = "v2-edited"\n')
-    assert run("codex", "reset-baseline").exit_code == 0
-    assert run("codex", "clear").exit_code == 0
-    assert (home / ".codex" / "config.toml").read_text() == 'model = "v2-edited"\n'
+def test_reset_baseline_command_removed(home):
+    assert run("codex", "reset-baseline").exit_code != 0
 
 
 # ------------------------------------------------------------------ safety

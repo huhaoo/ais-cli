@@ -1,4 +1,4 @@
-"""Core primitives: paths, atomic writes, backups, state, baseline, profiles.
+"""Core primitives: paths, atomic writes, backups, state, profiles.
 
 Everything ais manages lives under ``<home>/.config/ais``. ``<home>`` defaults
 to ``Path.home()`` and can be overridden with the ``AIS_HOME`` environment
@@ -64,10 +64,6 @@ def live_dir(home: Path, app: App) -> Path:
 
 def live_path(home: Path, app: App) -> Path:
     return live_dir(home, app) / app.live_file
-
-
-def baseline_dir(home: Path, app: App) -> Path:
-    return ais_dir(home) / "baseline" / app.name
 
 
 def backups_dir(home: Path, app: App) -> Path:
@@ -190,42 +186,6 @@ def resolve_current(home: Path, app: App) -> str:
         if h and h == sha256_file(live):
             return "official"
     return "unmanaged"
-
-
-# ---------------------------------------------------------------- baseline
-
-def baseline_captured(home: Path, app: App) -> bool:
-    return (baseline_dir(home, app) / "existed.json").is_file()
-
-
-def ensure_baseline(home: Path, app: App) -> bool:
-    """Capture the pre-ais live config once, never overwriting. True if new."""
-    if baseline_captured(home, app):
-        return False
-    bdir = baseline_dir(home, app)
-    bdir.mkdir(parents=True, exist_ok=True)
-    live = live_path(home, app)
-    existed = live.is_file()
-    if existed:
-        shutil.copy2(live, bdir / app.live_file)
-    atomic_write(bdir / "existed.json",
-                 json.dumps({app.live_file: existed}, indent=2) + "\n")
-    return True
-
-
-def read_baseline(home: Path, app: App) -> "tuple[bool, Optional[str]]":
-    """Return (existed, content); content is None when the file did not exist."""
-    meta = json.loads((baseline_dir(home, app) / "existed.json").read_text(encoding="utf-8"))
-    if not meta.get(app.live_file):
-        return False, None
-    return True, (baseline_dir(home, app) / app.live_file).read_text(encoding="utf-8")
-
-
-def reset_baseline(home: Path, app: App) -> None:
-    bdir = baseline_dir(home, app)
-    if bdir.exists():
-        shutil.rmtree(bdir)
-    ensure_baseline(home, app)
 
 
 # ---------------------------------------------------------------- profiles

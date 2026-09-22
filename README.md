@@ -14,8 +14,10 @@
 ```bash
 git clone https://github.com/huhaoo/ais-cli.git
 cd ais-cli
-pipx install .          # 推荐；或 uv tool install .
-# 本地开发安装
+pipx install .          # 推荐
+# 本地开发：editable 安装，ais 直接跟踪仓库源码
+pipx install --editable .
+# 或传统 venv
 python3 -m venv .venv && .venv/bin/pip install -e .
 ```
 
@@ -51,12 +53,11 @@ ais claude official
 | `ais codex\|claude save <p> [--force]` | 把当前 live 配置存成 profile；已存在默认拒绝覆盖 |
 | `ais codex\|claude delete <p> [--force]` | 删除 profile（正在使用时需 `--force`） |
 | `ais codex\|claude show <p>` | 打印 profile 内容 |
-| `ais codex\|claude clear [--hard]` | 恢复 ais 接管前的 baseline；`--hard` 才删除 live 配置 |
-| `ais codex\|claude official` | 同 `clear`（恢复 baseline，官方登录继续有效） |
+| `ais codex\|claude clear` | 删除 live 配置（先备份），回到官方登录 |
+| `ais codex\|claude official` | 同 `clear`：App 回到默认配置 + 官方登录凭据 |
 | `ais codex\|claude run <p>` | `use <p>` 后直接启动 `codex` / `claude`，退出不自动切回 |
 | `ais codex\|claude edit <p>` | 用 `$EDITOR` 编辑 profile 主配置 |
-| `ais codex\|claude reset-baseline` | 以当前 live 配置重新定义 baseline |
-| `ais status` | 两个 App 的 current / 官方登录检测 / profile 数 / baseline 状态 |
+| `ais status` | 两个 App 的 current / 官方登录检测 / profile 数 |
 | `ais doctor` / `ais validate` | 全面体检 / 语法校验（坏配置退出码 1） |
 | `ais backup` | 手动备份当前 live 配置 |
 
@@ -80,10 +81,6 @@ exec bash                   # 或重开终端（zsh 需已启用 compinit）
 ```
 ~/.config/ais/
 ├── state.json                     # 每个 App 的 current + 最后写入内容的 sha256
-├── baseline/
-│   └── codex/
-│       ├── config.toml            # ais 第一次写操作之前的原始 live 配置
-│       └── existed.json           # 记录原文件当时是否存在
 ├── backups/                       # 每次修改 live 配置前的时间戳备份（保留最近 50 份）
 ├── codex/
 │   └── <profile>/
@@ -121,8 +118,10 @@ exec bash                   # 或重开终端（zsh 需已启用 compinit）
 
 - 修改 live 配置（`~/.codex/config.toml`、`~/.claude/settings.json`）前必先备份到
   `~/.config/ais/backups/`；内容先经 `tomllib` / `json` 校验，非法即拒绝，live 不动。
-- baseline 只在第一次写操作前捕获一次，不会覆盖；`reset-baseline` 显式重建。
-- `clear` / `official` / `--hard` 都不会删除或修改任何官方登录文件。
+- `clear` / `official` 的语义固定为"回到官方登录"：删除 ais 管理的 live 配置文件
+  （删除前必有备份），App 回到自身默认配置，官方登录凭据接管；不存在 baseline，
+  也没有"恢复接管前配置"的行为。
+- `clear` / `official` 不会删除或修改任何官方登录文件。
 - API key 按设计明文保存在 profile 里——所以 `~/.config/ais` 别放进公开仓库；
   想版本管理可以 `git init` 后用私有 remote。
 
@@ -151,7 +150,7 @@ ais sync passwd         # 改密码（自动用新密码重新加密存储的 to
 - **token 加密存储**：`~/.config/ais/sync.json` 里存的是用密码对称加密后的
   token（AES），明文 token 不落盘；`sync.json` 本身永远不参与同步。
 - **只同步 profile**：压缩包只包含 `codex/` 和 `claude/` 下的 profile 目录。
-  `state.json`、`baseline/`、`backups/`、`sync.json` 都是机器本地文件，不上传。
+  `state.json`、`backups/`、`sync.json` 都是机器本地文件，不上传。
 - **加密格式**：标准 AES zip（WZ_AES）。即使不用 ais，也能用 `7z x -p<密码>`
   手工解开压缩包恢复文件。
 - **同步语义**：last-writer-wins。`pull` 会**整体替换**本地两个 profile 目录
@@ -160,12 +159,48 @@ ais sync passwd         # 改密码（自动用新密码重新加密存储的 to
   压缩包内的路径穿越（`../`）成员会被拒绝。
 - 修改 URL / token：重跑 `ais sync setup`；改密码：`ais sync passwd`。
 
+## 用量统计（本地日志 + 公开单价估算）
+
+ais 不经过 API 流量，用量从两个 CLI 写在本地的会话日志中还原：
+
+- Claude Code：`~/.claude/projects/*/*.jsonl`（按 message id 去重，跨文件恢复的会话不会重复计数）
+- Codex：`~/.codex/sessions/**/rollout-*.jsonl`（优先用逐请求的 `token_usage_record`，
+  模型经 `turn_context` 匹配；老版本只有累计 `token_count`，取每个会话最后一次总量）
+
+```bash
+ais usage                 # 两个 App 全部历史，按模型列出 token 与估算成本（默认 CNY）
+ais usage codex           # 只看 codex（或 claude）
+ais usage --days 7        # 最近 7 天
+ais usage -c usd          # 以美元输出（--currency cny|usd）
+ais usage --json          # 机器可读输出
+```
+
+单价来自官方公开牌价，内置在包内 `ais/prices.json` 并标注获取日期与来源，覆盖：
+
+- **OpenAI**（gpt-6-astra、gpt-5.6 系列、gpt-5.3-codex 及历史模型）与 **Anthropic**
+  （Fable 5.1 / Opus 5 / Sonnet 5 / Haiku 4.5 及历史模型）——USD 牌价，标准档、短上下文
+- **DeepSeek**（deepseek-flash / v4-pro，按**非高峰价**；高峰时段为其 2 倍）
+- **智谱 GLM**（glm-5.3 / 5.2 / 5.3-flash，**国内人民币刊例**：¥8/¥2/¥28 等）
+- **Kimi / Moonshot**（kimi-k3 / k2.7-code / k2.6 / k2.5 / k2；K2.6 用国内 ¥ 刊例，其余用国际站 USD 价）
+
+每条价格带原生货币标记：显示 CNY 时人民币牌价直接使用、美元牌价才按内置汇率（6.71）换算；
+`--currency usd` 时反向。缓存读缺失默认 0.1× 输入价；缓存写加价 1.25× 是 Anthropic 特有
+（其条目已显式标注），其余家缓存写按普通输入价。两家 CLI 缓存语义不同，已分别处理：
+OpenAI 的 `input_tokens` 是含缓存的总量（统计时已扣除，避免重复计价），Anthropic 的本身不含缓存。
+
+- 想改价或补自定义模型（如第三方中转的实际折扣价）：把 `ais/prices.json` 复制到
+  `~/.config/ais/prices.json` 编辑，同名键覆盖、新键追加
+- 模型名匹配：先精确，再按 `-`/`.` 边界最长前缀（`claude-sonnet-5-20260101` 会命中 `claude-sonnet-5`）
+- 查不到单价的模型（如自定义 provider 的模型）显示 `—`，token 照常统计
+- 注意：这是**按官方牌价的估算**；第三方 provider 实际计费可能不同（例如按月订阅）
+- 统计只读日志，不联网、不上传任何数据
+
 ## 开发
 
 ```bash
-python3 -m pytest tests/ -q     # 25 个用例，无需真实 codex/claude
+python3 -m pytest tests/ -q     # 55 个用例，无需真实 codex/claude
 ```
 
-实现共三个模块：`ais/core.py`（路径 / 原子写 / 备份 / state / baseline）、
+实现共三个模块：`ais/core.py`（路径 / 原子写 / 备份 / state）、
 `ais/apps.py`（两个 App 的适配器与 Codex catalog 改写）、`ais/cli.py`（Typer 命令，
 codex/claude 子命令由同一工厂生成，杜绝两份逻辑漂移）。

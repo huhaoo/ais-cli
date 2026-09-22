@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ais-cli"
-version = "0.1.0"
+version = "0.2.0"
 description = "ais — switch provider profiles for OpenAI Codex CLI and Claude Code"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,3 +21,6 @@ ais = "ais.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["ais*"]
+
+[tool.setuptools.package-data]
+ais = ["prices.json"]
