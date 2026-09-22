@@ -6,7 +6,7 @@ Design:
   token encrypted with the sync password (symmetric: same password encrypts
   and decrypts). sync.json itself is never synced.
 - Only the portable part of ais travels: the ``codex/`` and ``claude/``
-  profile directories. state.json, baseline/ and backups/ are machine-local.
+  profile directories. state.json and backups/ are machine-local.
 - The archive is a standard AES zip (WZ_AES): recoverable with 7-Zip/unzip
   using the same password, independent of ais.
 """
@@ -165,8 +165,23 @@ class SeafileClient:
         if r.status_code == 404:
             raise AisError(f"remote {remote_path} not found; push first")
         self._check(r, "download")
+        # Some Seafile servers (Pro 11.0.x) answer 200 with the JSON-quoted
+        # file-server URL instead of a 302 redirect; follow it for the bytes.
+        try:
+            link = json.loads(r.text)
+        except ValueError:
+            link = None
+        if isinstance(link, str) and link.startswith(("http://", "https://")):
+            r = self._request("GET", link, allow_redirects=True)
+            self._check(r, "download file")
         if len(r.content) > MAX_DOWNLOAD:
             raise AisError("downloaded archive unexpectedly large; refusing")
+        if not r.content.startswith(b"PK"):  # every zip starts with PK
+            raise AisError(
+                f"download: server returned {len(r.content)} byte(s) of "
+                f"{r.headers.get('Content-Type', 'unknown type')!r} instead "
+                f"of the zip archive (final URL: {r.url}); first bytes: "
+                f"{r.content[:96]!r}")
         return r.content
 
     def file_detail(self, repo_id: str, remote_path: str) -> Optional[dict]:
@@ -249,6 +264,9 @@ def extract_archive(blob: bytes, password: str) -> "tuple[dict[str, bytes], list
                     skipped.append(name)
                     continue
                 files[name] = z.read(name)
+    except pyzipper.BadZipFile as e:
+        raise AisError(f"downloaded archive is corrupt or truncated "
+                       f"({len(blob)} bytes): {e}")
     except RuntimeError:
         raise AisError("wrong password or corrupted archive")
     except Exception as e:

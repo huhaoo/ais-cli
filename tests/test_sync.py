@@ -14,10 +14,12 @@ PW = "correct-horse-battery"
 
 
 class FakeResponse:
-    def __init__(self, status=200, text="", content=b""):
+    def __init__(self, status=200, text="", content=b"", url="", ctype=None):
         self.status_code = status
         self.text = text if content == b"" else content.decode("utf-8", "replace")
         self.content = content if content != b"" else text.encode()
+        self.url = url
+        self.headers = {"Content-Type": ctype} if ctype else {}
 
     @property
     def ok(self):
@@ -254,6 +256,56 @@ def test_pull_404_reports_not_found(home, monkeypatch):
                         lambda url, token, session=None: SeafileClient(url, token, session=FakeSession()))
     with pytest.raises(AisError, match="push first"):
         sync.pull(home, PW, yes=True)
+
+
+def test_pull_follows_json_quoted_download_link(home, monkeypatch):
+    """Seafile Pro 11 answers 200 with a JSON-quoted file URL, not a 302."""
+    configure(home, monkeypatch, FakeSession())
+    archive = sync.build_archive({"codex/j/config.toml": 'model = "j"\n'}, PW)
+    routes = FakeSession({
+        ("GET", "/file/"): FakeResponse(
+            text='"https://sf.example.com/seafhttp/files/tok1/ais-profiles.zip"'),
+        ("GET", "/seafhttp/files/"): FakeResponse(content=archive),
+    })
+    monkeypatch.setattr(sync, "SeafileClient",
+                        lambda url, token, session=None: SeafileClient(url, token, session=routes))
+    msg = sync.pull(home, PW, yes=True)
+    assert "pulled 1 file(s)" in msg
+    assert (home / ".config" / "ais" / "codex" / "j" / "config.toml").is_file()
+    # the archive came from the absolute link found in the JSON body
+    assert any(u.startswith("https://sf.example.com/seafhttp/files/")
+               for m, u, kw in routes.calls)
+
+
+def test_pull_non_zip_download_shows_what_arrived(home, monkeypatch):
+    configure(home, monkeypatch, FakeSession())
+    routes = FakeSession({("GET", "/file/"): FakeResponse(
+        content=b"<html>please sign in</html>",
+        url="https://sf.example.com/accounts/login/", ctype="text/html")})
+    monkeypatch.setattr(sync, "SeafileClient",
+                        lambda url, token, session=None: SeafileClient(url, token, session=routes))
+    with pytest.raises(AisError, match=r"text/html.*please sign in"):
+        sync.pull(home, PW, yes=True)
+    assert (home / ".config" / "ais" / "codex" / "p1" / "config.toml").is_file()
+
+
+def test_pull_empty_download_rejected(home, monkeypatch):
+    configure(home, monkeypatch, FakeSession())
+    routes = FakeSession({("GET", "/file/"): FakeResponse(content=b"")})
+    monkeypatch.setattr(sync, "SeafileClient",
+                        lambda url, token, session=None: SeafileClient(url, token, session=routes))
+    with pytest.raises(AisError, match="0 byte"):
+        sync.pull(home, PW, yes=True)
+
+
+def test_pull_truncated_archive_is_reported(home, monkeypatch):
+    configure(home, monkeypatch, FakeSession())
+    blob = sync.build_archive({"codex/x/config.toml": 'model = "x"\n'}, PW)
+    monkeypatch.setattr(sync, "SeafileClient",
+                        lambda url, token, session=None: SeafileClient(url, token, session=pull_routes_with(blob[:len(blob) // 2])))
+    with pytest.raises(AisError, match="truncated"):
+        sync.pull(home, PW, yes=True)
+    assert (home / ".config" / "ais" / "codex" / "p1" / "config.toml").is_file()
 
 
 # ------------------------------------------------------------------ passwd
