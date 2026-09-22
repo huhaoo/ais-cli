@@ -196,21 +196,144 @@ def test_use_codex_without_models_json_leaves_paths_alone(home):
     assert live["model_catalog_json"] == "/keep/me.json"
 
 
-def test_use_claude_verbatim(home):
+def test_use_claude_preserves_fields_and_hides_attribution(home):
     make_claude_profile(home, "p1")
     r = run("claude", "use", "p1")
     assert r.exit_code == 0, r.output
-    assert (home / ".claude" / "settings.json").read_text() == CLAUDE_SETTINGS
+    live = json.loads((home / ".claude" / "settings.json").read_text())
+    expected = json.loads(CLAUDE_SETTINGS)
+    expected["includeCoAuthoredBy"] = False
+    expected["attribution"] = {"commit": ""}
+    assert live == expected
+    assert "hiding AI commit attribution" in r.output
     assert "p1" in run("claude", "current").output
+
+
+def test_use_claude_verbatim_when_attribution_off(home):
+    make_claude_profile(home, "p1")
+    assert run("attribution", "off").exit_code == 0
+    r = run("claude", "use", "p1")
+    assert r.exit_code == 0, r.output
+    assert (home / ".claude" / "settings.json").read_text() == CLAUDE_SETTINGS
+    assert "hiding AI commit attribution" not in r.output
 
 
 def test_use_unknown_profile_fails(home):
     assert run("codex", "use", "nope").exit_code != 0
 
 
+# ------------------------------------------------------------------ hide AI attribution
+
+def test_attribution_defaults_on_and_toggles(home):
+    assert "hide AI commit attribution: on" in run("attribution").output
+    assert run("attribution", "off").exit_code == 0
+    assert "hide AI commit attribution: off" in run("attribution").output
+    settings = json.loads((home / ".config" / "ais" / "settings.json").read_text())
+    assert settings == {"hide_ai_attribution": False}
+    assert run("attribution", "on").exit_code == 0
+    settings = json.loads((home / ".config" / "ais" / "settings.json").read_text())
+    assert settings == {"hide_ai_attribution": True}
+    assert run("attribution", "bogus").exit_code != 0
+
+
+def test_status_shows_attribution_state(home):
+    assert "hide AI commit attribution: on" in run("status").output
+    run("attribution", "off")
+    assert "hide AI commit attribution: off" in run("status").output
+
+
+def test_use_codex_hides_attribution_default_on(home):
+    make_codex_profile(home, "p1", text='model = "m"\nmodel_provider = "x"\n')
+    r = run("codex", "use", "p1")
+    assert r.exit_code == 0, r.output
+    live = (home / ".codex" / "config.toml").read_text()
+    assert "[features]\ncommit_attribution_enabled = false" in live
+    assert tomllib.loads(live)["features"]["commit_attribution_enabled"] is False
+    assert "hiding AI commit attribution" in r.output
+
+
+def test_use_codex_attribution_joins_existing_features_table(home):
+    text = ('model = "m"\n'
+            '# keep me\n'
+            '\n'
+            '[features]\n'
+            'other_feature = true  # inline comment stays\n'
+            '\n'
+            '[model_providers.x]\n'
+            'base_url = "https://example.com/v1"\n')
+    make_codex_profile(home, "p1", text=text)
+    assert run("codex", "use", "p1").exit_code == 0
+    live = (home / ".codex" / "config.toml").read_text()
+    assert live.count("[features]") == 1
+    parsed = tomllib.loads(live)
+    assert parsed["features"] == {"commit_attribution_enabled": False,
+                                  "other_feature": True}
+    assert "# keep me" in live
+    assert "# inline comment stays" in live
+
+
+def test_use_codex_attribution_overrides_explicit_true(home):
+    make_codex_profile(home, "p1", text='[features]\ncommit_attribution_enabled = true\n')
+    assert run("codex", "use", "p1").exit_code == 0
+    live = (home / ".codex" / "config.toml").read_text()
+    assert tomllib.loads(live)["features"]["commit_attribution_enabled"] is False
+
+
+def test_use_codex_attribution_off_writes_verbatim(home):
+    make_codex_profile(home, "p1", text='model = "m"\n')
+    run("attribution", "off")
+    r = run("codex", "use", "p1")
+    assert r.exit_code == 0
+    assert (home / ".codex" / "config.toml").read_text() == 'model = "m"\n'
+    assert "hiding AI commit attribution" not in r.output
+
+
+def test_save_strips_injected_attribution(home):
+    # codex: live has ais-injected key -> profile stays portable
+    make_codex_profile(home, "src", text='model = "m"\n')
+    assert run("codex", "use", "src").exit_code == 0
+    assert "commit_attribution_enabled" in (home / ".codex" / "config.toml").read_text()
+    assert run("codex", "save", "clean").exit_code == 0
+    saved = (home / ".config" / "ais" / "codex" / "clean" / "config.toml").read_text()
+    assert "commit_attribution_enabled" not in saved
+    assert "[features]" not in saved
+    assert saved == 'model = "m"\n'
+
+    # claude: same round-trip
+    make_claude_profile(home, "src")
+    assert run("claude", "use", "src").exit_code == 0
+    assert run("claude", "save", "clean").exit_code == 0
+    saved = json.loads((home / ".config" / "ais" / "claude" / "clean" / "settings.json").read_text())
+    assert saved == json.loads(CLAUDE_SETTINGS)
+    assert "includeCoAuthoredBy" not in saved and "attribution" not in saved
+
+
+def test_save_keeps_user_written_attribution(home):
+    live = home / ".claude" / "settings.json"
+    live.write_text(json.dumps({"attribution": {"commit": "", "pr": "custom"},
+                                "includeCoAuthoredBy": True}, indent=2))
+    assert run("claude", "save", "p").exit_code == 0
+    saved = json.loads((home / ".config" / "ais" / "claude" / "p" / "settings.json").read_text())
+    assert saved == {"attribution": {"pr": "custom"}, "includeCoAuthoredBy": True}
+
+    live2 = home / ".codex" / "config.toml"
+    live2.write_text('[features]\ncommit_attribution_enabled = true\n')
+    assert run("codex", "save", "q").exit_code == 0
+    saved2 = (home / ".config" / "ais" / "codex" / "q" / "config.toml").read_text()
+    assert "commit_attribution_enabled = true" in saved2
+
+
+def test_doctor_catches_broken_settings_json(home):
+    sdir = home / ".config" / "ais"
+    sdir.mkdir(parents=True)
+    (sdir / "settings.json").write_text("{broken")
+    assert run("doctor").exit_code == 1
+    assert "settings.json" in run("validate").output
+
+
 # ------------------------------------------------------------------ clear / official
 
-def test_clear_deletes_live_config_and_keeps_auth(home):
+def test_clear_removes_overrides_keeps_auth_and_hides_attribution(home):
     auth = home / ".codex" / "auth.json"
     auth.write_text('{"tokens": "keep-me"}')
     make_codex_profile(home, "p1")
@@ -219,19 +342,50 @@ def test_clear_deletes_live_config_and_keeps_auth(home):
 
     r = run("codex", "clear")
     assert r.exit_code == 0, r.output
-    assert not (home / ".codex" / "config.toml").exists()
+    # minimal config holding only the hide keys, provider overrides gone
+    live = (home / ".codex" / "config.toml").read_text()
+    assert tomllib.loads(live) == {"features": {"commit_attribution_enabled": False}}
+    assert "hiding AI commit attribution" in r.output
     assert auth.read_text() == '{"tokens": "keep-me"}'
     assert run("codex", "current").output.strip() == "official"
-    # the removed config was backed up first
+    # the replaced config was backed up first
     backups = list((home / ".config" / "ais" / "backups" / "codex").iterdir())
     assert len(backups) == 1
+
+
+def test_clear_without_attribution_hiding_deletes_live_config(home):
+    make_codex_profile(home, "p1")
+    assert run("codex", "use", "p1").exit_code == 0
+    run("attribution", "off")
+    r = run("codex", "clear")
+    assert r.exit_code == 0, r.output
+    assert not (home / ".codex" / "config.toml").exists()
+    assert run("codex", "current").output.strip() == "official"
+
+
+def test_clear_official_state_detects_manual_modification(home):
+    make_codex_profile(home, "p1")
+    assert run("codex", "use", "p1").exit_code == 0
+    assert run("codex", "clear").exit_code == 0
+    assert run("codex", "current").output.strip() == "official"
+    (home / ".codex" / "config.toml").write_text('model = "manual"\n')
+    assert run("codex", "current").output.strip() == "unmanaged"
+
+
+def test_clear_claude_writes_minimal_hidden_settings(home):
+    make_claude_profile(home, "p1")
+    assert run("claude", "use", "p1").exit_code == 0
+    assert run("claude", "clear").exit_code == 0
+    settings = json.loads((home / ".claude" / "settings.json").read_text())
+    assert settings == {"includeCoAuthoredBy": False, "attribution": {"commit": ""}}
+    assert run("claude", "current").output.strip() == "official"
 
 
 def test_clear_rejects_removed_hard_option(home):
     assert run("codex", "clear", "--hard").exit_code != 0
 
 
-def test_official_deletes_live_config(home):
+def test_official_writes_minimal_hidden_config(home):
     live = home / ".codex" / "config.toml"
     live.write_text('model = "orig"\n')
     make_codex_profile(home, "p1")
@@ -239,14 +393,14 @@ def test_official_deletes_live_config(home):
 
     r = run("codex", "official")
     assert r.exit_code == 0, r.output
-    assert not live.exists()
+    assert tomllib.loads(live.read_text()) == {"features": {"commit_attribution_enabled": False}}
     assert run("codex", "current").output.strip() == "official"
 
     # `use official` is the same thing
     assert run("codex", "use", "p1").exit_code == 0
     r = run("codex", "use", "official")
     assert r.exit_code == 0, r.output
-    assert not live.exists()
+    assert tomllib.loads(live.read_text()) == {"features": {"commit_attribution_enabled": False}}
 
 
 def test_reset_baseline_command_removed(home):

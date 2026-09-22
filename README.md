@@ -57,7 +57,8 @@ ais claude official
 | `ais codex\|claude official` | 同 `clear`：App 回到默认配置 + 官方登录凭据 |
 | `ais codex\|claude run <p>` | `use <p>` 后直接启动 `codex` / `claude`，退出不自动切回 |
 | `ais codex\|claude edit <p>` | 用 `$EDITOR` 编辑 profile 主配置 |
-| `ais status` | 两个 App 的 current / 官方登录检测 / profile 数 |
+| `ais status` | 两个 App 的 current / 官方登录检测 / profile 数 / 署名隐藏开关 |
+| `ais attribution [on\|off]` | 隐藏 git commit 里的 AI 署名（默认开启；省略参数 = 查看当前状态） |
 | `ais doctor` / `ais validate` | 全面体检 / 语法校验（坏配置退出码 1） |
 | `ais backup` | 手动备份当前 live 配置 |
 
@@ -81,6 +82,7 @@ exec bash                   # 或重开终端（zsh 需已启用 compinit）
 ```
 ~/.config/ais/
 ├── state.json                     # 每个 App 的 current + 最后写入内容的 sha256
+├── settings.json                  # ais 自身设置（隐藏 AI 署名开关等；机器本地，不参与同步）
 ├── backups/                       # 每次修改 live 配置前的时间戳备份（保留最近 50 份）
 ├── codex/
 │   └── <profile>/
@@ -114,13 +116,47 @@ exec bash                   # 或重开终端（zsh 需已启用 compinit）
 {"OPENAI_API_KEY": "sk-...", "HTTPS_PROXY": "http://127.0.0.1:7890"}
 ```
 
+## 隐藏 AI 署名（默认开启）
+
+两个 CLI 替你写 git commit / PR 时会附加 AI 署名：
+
+- **Codex**：commit 尾部的 `Co-authored-by: Codex <noreply@openai.com>`，PR 描述里的
+  `Generated with [Codex](https://openai.com/codex/).`
+- **Claude Code**：commit 尾部的 `Co-Authored-By: Claude <noreply@anthropic.com>` 与
+  "Generated with Claude Code" 落款
+
+`use` / `run` 写入 live 配置时，ais 默认顺带关闭它们（键名取自各 CLI 官方配置，
+已在 Codex 0.155 / Claude Code 2.1 验证）：
+
+| App | 注入内容 |
+|---|---|
+| codex | `[features] commit_attribution_enabled = false`（逐字保留其余内容与注释） |
+| claude | `includeCoAuthoredBy = false`（旧键，老版本也认）+ `attribution.commit = ""`（2.1+ 新键，空字符串 = 整条落款含尾注一起隐藏） |
+
+```bash
+ais attribution        # 查看当前状态（on / off）
+ais attribution off    # 关闭：use 原样写入 profile，不做任何改写
+ais attribution on     # 重新开启（默认）
+```
+
+- 开关存于 `~/.config/ais/settings.json`，机器本地，**不参与 sync**。
+- `save` 存 profile 前会把注入的键剥离，profile 始终是你自己的内容；你自己手写的
+  同名键（如 `commit_attribution_enabled = true`、自定义 `attribution`）原样保留，
+  仅在 `use` 且开关为 on 时被覆盖为隐藏值。
+- `clear` / `official` 同样生效：删除 provider 覆盖后，开关为 on 时会写入一份
+  **仅含隐藏键**的最小 live 配置（不含其他任何内容），官方登录下的 commit 也不带
+  署名；开关为 off 时彻底删除 live 配置，App 完全回到自身默认。
+- 注入在内存中完成，写盘前同样经过 TOML / JSON 校验，失败即拒绝切换。
+
 ## 安全模型
 
 - 修改 live 配置（`~/.codex/config.toml`、`~/.claude/settings.json`）前必先备份到
   `~/.config/ais/backups/`；内容先经 `tomllib` / `json` 校验，非法即拒绝，live 不动。
-- `clear` / `official` 的语义固定为"回到官方登录"：删除 ais 管理的 live 配置文件
-  （删除前必有备份），App 回到自身默认配置，官方登录凭据接管；不存在 baseline，
-  也没有"恢复接管前配置"的行为。
+  「隐藏 AI 署名」的注入也发生在校验之前的内存里，产出非法内容同样拒绝写盘。
+- `clear` / `official` 的语义固定为"回到官方登录"：删除 ais 管理的 provider 覆盖
+  （删除前必有备份），官方登录凭据接管；不存在 baseline，也没有"恢复接管前配置"
+  的行为。「隐藏 AI 署名」开启时，删除后会写入一份仅含隐藏键的最小 live 配置，
+  除此之外不含任何 provider 设置。
 - `clear` / `official` 不会删除或修改任何官方登录文件。
 - API key 按设计明文保存在 profile 里——所以 `~/.config/ais` 别放进公开仓库；
   想版本管理可以 `git init` 后用私有 remote。
@@ -198,7 +234,7 @@ OpenAI 的 `input_tokens` 是含缓存的总量（统计时已扣除，避免重
 ## 开发
 
 ```bash
-python3 -m pytest tests/ -q     # 55 个用例，无需真实 codex/claude
+python3 -m pytest tests/ -q     # 72 个用例，无需真实 codex/claude
 ```
 
 实现共三个模块：`ais/core.py`（路径 / 原子写 / 备份 / state）、

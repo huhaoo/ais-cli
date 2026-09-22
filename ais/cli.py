@@ -67,6 +67,12 @@ def _cmd_use(a: App, profile: str) -> None:
     except Exception as e:
         _die(f"profile '{profile}' {a.live_file} is invalid, refusing to switch: {e}")
     content = a.prepare_use(pdir, content)
+    if core.hide_ai_attribution(home):
+        hidden = a.hide_attribution(content)
+        if hidden != content:
+            content = hidden
+            typer.echo("note: hiding AI commit attribution "
+                       "('ais attribution off' to keep it)")
     try:
         a.validate(content)
     except Exception as e:
@@ -99,6 +105,11 @@ def _cmd_save(a: App, profile: str, force: bool) -> None:
         a.validate(text)
     except Exception as e:
         _die(f"live {a.live_file} is invalid, nothing saved: {e}")
+    text = a.strip_attribution(text)  # profiles stay free of ais-injected keys
+    try:
+        a.validate(text)
+    except Exception as e:
+        _die(f"stripped config for '{profile}' is invalid, nothing saved: {e}")
 
     pdir.mkdir(parents=True, exist_ok=True)
     core.atomic_write(pdir / a.live_file, text)
@@ -109,17 +120,38 @@ def _cmd_save(a: App, profile: str, force: bool) -> None:
 
 
 def _cmd_clear(a: App) -> None:
-    """Remove the live config so the app falls back to its official login."""
+    """Remove provider overrides so the app falls back to its official login.
+
+    With attribution hiding on (the default), a minimal live config holding
+    only the hide keys is written instead of deleting the file, so commits
+    stay attribution-free on the official login too.
+    """
     home = core.get_home()
     live = core.live_path(home, a)
     backup = core.backup_live(home, a)
 
-    if live.exists():
-        live.unlink()
-        typer.echo(f"{a.name}: removed {live} (official login takes over)")
+    hidden = None
+    if core.hide_ai_attribution(home):
+        hidden = a.hide_attribution(a.empty_content)
+        try:
+            a.validate(hidden)
+        except Exception as e:
+            _die(f"generated minimal config is invalid, refusing to write: {e}")
+
+    if hidden is not None:
+        core.atomic_write(live, hidden)
+        core.set_state(home, a, current=None, live_hash=core.sha256_text(hidden),
+                       official=True)
+        typer.echo(f"{a.name}: provider overrides removed (official login takes over)")
+        typer.echo(f"{a.name}: wrote minimal config hiding AI commit attribution "
+                   f"at {live}")
     else:
-        typer.echo(f"{a.name}: no live config at {live}")
-    core.set_state(home, a, current=None, live_hash=None, official=True)
+        if live.exists():
+            live.unlink()
+            typer.echo(f"{a.name}: removed {live} (official login takes over)")
+        else:
+            typer.echo(f"{a.name}: no live config at {live}")
+        core.set_state(home, a, current=None, live_hash=None, official=True)
 
     if backup:
         typer.echo(f"backup: {backup}")
@@ -219,6 +251,15 @@ def _check_all(home) -> "list[str]":
             json.loads(sp.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             problems.append(f"state.json: {e}")
+
+    sp = core.settings_path(home)
+    if sp.is_file():
+        try:
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("expected a JSON object")
+        except (OSError, ValueError) as e:
+            problems.append(f"settings.json: {e}")
 
     for a in APPS_ORDER:
         live = core.live_path(home, a)
@@ -504,6 +545,29 @@ def usage_cmd(
 
 # ---------------------------------------------------------------- generic commands
 
+@app.command("attribution")
+def attribution_cmd(
+    action: str = typer.Argument("", help="'on' (default) or 'off'; omit to "
+                                       "show the current state."),
+) -> None:
+    """Hide AI attribution (Co-authored-by trailers) in git commits.
+
+    On: `use`/`run` inject codex `[features] commit_attribution_enabled = false`
+    and claude `includeCoAuthoredBy = false` + `attribution.commit = ""` into
+    the live config. Injected keys are stripped again by `save`; `clear` /
+    `official` keep it applied by writing a minimal live config that holds
+    only the hide keys (the live config is deleted entirely when off).
+    """
+    home = core.get_home()
+    if action in ("", "show"):
+        typer.echo(f"hide AI commit attribution: {'on' if core.hide_ai_attribution(home) else 'off'}")
+        return
+    if action not in ("on", "off"):
+        _die(f"unknown action {action!r}; expected 'on' or 'off'")
+    core.set_hide_ai_attribution(home, action == "on")
+    typer.echo(f"hide AI commit attribution: {action}")
+
+
 @app.command("status")
 def status_cmd() -> None:
     """Show current profile and official-login status for each app."""
@@ -515,6 +579,7 @@ def status_cmd() -> None:
         typer.echo(f"  official auth: {core.auth_status(home, a)}")
         typer.echo(f"  profiles: {len(names)}"
                    + (f" ({', '.join(names)})" if names else ""))
+    typer.echo(f"hide AI commit attribution: {'on' if core.hide_ai_attribution(home) else 'off'}")
 
 
 @app.command("backup")

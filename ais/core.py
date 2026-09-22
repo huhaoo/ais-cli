@@ -37,6 +37,11 @@ class App:
     auth_files: tuple[str, ...]                # official-login files (never touched)
     prepare_use: Callable[[Path, str], str]    # (profile_dir, content) -> content
     post_save: Callable[..., list]             # (app, home, profile_dir) -> warnings
+    hide_attribution: Callable[[str], str]     # content -> content with AI commit
+                                               # attribution hidden (applied by `use`)
+    strip_attribution: Callable[[str], str]    # inverse; `save` stores profiles pure
+    empty_content: str                         # valid empty live config; `clear`
+                                               # writes hide_attribution(empty_content)
 
 
 def get_home() -> Path:
@@ -72,6 +77,10 @@ def backups_dir(home: Path, app: App) -> Path:
 
 def state_path(home: Path) -> Path:
     return ais_dir(home) / "state.json"
+
+
+def settings_path(home: Path) -> Path:
+    return ais_dir(home) / "settings.json"
 
 
 # ---------------------------------------------------------------- names
@@ -186,6 +195,43 @@ def resolve_current(home: Path, app: App) -> str:
         if h and h == sha256_file(live):
             return "official"
     return "unmanaged"
+
+
+# ---------------------------------------------------------------- settings.json
+
+HIDE_ATTRIBUTION_DEFAULT = True
+
+
+def read_settings(home: Path, strict: bool = False) -> dict:
+    p = settings_path(home)
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+    except (OSError, ValueError) as e:
+        if strict:
+            raise AisError(f"cannot read {p}: {e}")
+        return {}
+    return data
+
+
+def write_settings(home: Path, settings: dict) -> None:
+    atomic_write(settings_path(home),
+                 json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+
+
+def hide_ai_attribution(home: Path) -> bool:
+    """Whether `use` should hide AI attribution in git commits (default: on)."""
+    value = read_settings(home).get("hide_ai_attribution", HIDE_ATTRIBUTION_DEFAULT)
+    return value if isinstance(value, bool) else HIDE_ATTRIBUTION_DEFAULT
+
+
+def set_hide_ai_attribution(home: Path, on: bool) -> None:
+    settings = read_settings(home, strict=True)
+    settings["hide_ai_attribution"] = on
+    write_settings(home, settings)
 
 
 # ---------------------------------------------------------------- profiles

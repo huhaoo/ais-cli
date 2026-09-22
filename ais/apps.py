@@ -27,6 +27,16 @@ _TOML_STRING_VALUE = re.compile(
 )
 _TABLE_HEADER = re.compile(r"(?m)^\s*\[")
 
+# AI commit attribution (Co-authored-by trailers Codex appends to commits/PRs)
+ATTRIB_KEY = "commit_attribution_enabled"
+# [ \t] (not \s) keeps the header match on one line, so a comment on the
+# *next* line stays part of the section body instead of being swallowed.
+_FEATURES_HEADER = re.compile(r"(?m)^[ \t]*\[features\][ \t]*(?:#.*)?$")
+_ATTRIB_VALUE = re.compile(r"(?m)^([ \t]*" + ATTRIB_KEY + r"[ \t]*=[ \t]*)(true|false)")
+_ATTRIB_LINE_FALSE = re.compile(
+    r"(?m)^[ \t]*" + ATTRIB_KEY + r"[ \t]*=[ \t]*false[ \t]*(?:#.*)?\r?\n?"
+)
+
 
 def validate_toml(text: str) -> None:
     tomllib.loads(text)
@@ -78,6 +88,101 @@ def codex_prepare_use(profile_dir: Path, content: str) -> str:
     return content
 
 
+def codex_hide_attribution(text: str) -> str:
+    """Ensure ``[features] commit_attribution_enabled = false``, file stays verbatim.
+
+    Codex >= 0.155 appends ``Co-authored-by: Codex <noreply@openai.com>`` to
+    commit messages and a ``Generated with [Codex](...)`` line to PR bodies when
+    the feature is enabled. The key is set inside an existing ``[features]``
+    table when there is one (only that table's own section is examined, so a
+    same-named key under another table is left alone); otherwise the table is
+    appended. Comments and unknown fields survive.
+    """
+    line = f"{ATTRIB_KEY} = false"
+    header = _FEATURES_HEADER.search(text)
+    if header is None:
+        body = text.rstrip("\n")
+        return (body + "\n\n" if body else "") + "[features]\n" + line + "\n"
+
+    rest = text[header.end():]
+    nxt = _TABLE_HEADER.search(rest)
+    section, tail = (rest[:nxt.start()], rest[nxt.start():]) if nxt else (rest, "")
+    if _ATTRIB_VALUE.search(section):
+        section = _ATTRIB_VALUE.sub(lambda m: m.group(1) + "false", section, count=1)
+    else:
+        section = "\n" + line + section
+    return text[:header.end()] + section + tail
+
+
+def codex_strip_attribution(text: str) -> str:
+    """Remove the ``commit_attribution_enabled = false`` line ais injects.
+
+    Only the ais-set value (``false``) is removed; a user-authored ``true``
+    stays. If the ``[features]`` table becomes empty, its header goes too.
+    """
+    header = _FEATURES_HEADER.search(text)
+    if header is None:
+        return text
+    rest = text[header.end():]
+    nxt = _TABLE_HEADER.search(rest)
+    section, tail = (rest[:nxt.start()], rest[nxt.start():]) if nxt else (rest, "")
+    new_section, n = _ATTRIB_LINE_FALSE.subn("", section, count=1)
+    if n == 0:
+        return text
+    if not new_section.strip():
+        prefix = text[:header.start()].rstrip("\n")
+        if not tail.strip():
+            return prefix + "\n" if prefix else ""
+        return (prefix + "\n\n" if prefix else "") + tail.lstrip("\n")
+    return text[:header.end()] + new_section + tail
+
+
+def claude_hide_attribution(text: str) -> str:
+    """Hide Claude's commit attribution in settings.json content.
+
+    Sets both spellings: ``includeCoAuthoredBy: false`` (older Claude Code)
+    and ``attribution.commit: ""`` (Claude Code >= 2.1, where an empty string
+    hides the footer *and* the Co-Authored-By trailer). Existing keys keep
+    their position; only formatting is normalised.
+    """
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return text  # invalid; `use` refuses to switch on validate anyway
+    if not isinstance(obj, dict):
+        obj = {}
+    obj["includeCoAuthoredBy"] = False
+    attr = obj.get("attribution")
+    if not isinstance(attr, dict):
+        attr = {}
+    attr["commit"] = ""
+    obj["attribution"] = attr
+    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
+def claude_strip_attribution(text: str) -> str:
+    """Remove the attribution keys ais injects; user customisations stay."""
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(obj, dict):
+        return text
+    changed = False
+    if obj.get("includeCoAuthoredBy") is False:
+        del obj["includeCoAuthoredBy"]
+        changed = True
+    attr = obj.get("attribution")
+    if isinstance(attr, dict) and attr.get("commit") == "":
+        del attr["commit"]
+        if not attr:
+            del obj["attribution"]
+        changed = True
+    if not changed:
+        return text
+    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
 def codex_post_save(app: App, home: Path, profile_dir: Path) -> list:
     """After the live config.toml was copied into the profile, handle models.json.
 
@@ -120,6 +225,9 @@ CODEX = App(
     auth_files=("auth.json",),
     prepare_use=codex_prepare_use,
     post_save=codex_post_save,
+    hide_attribution=codex_hide_attribution,
+    strip_attribution=codex_strip_attribution,
+    empty_content="",
 )
 
 CLAUDE = App(
@@ -131,6 +239,9 @@ CLAUDE = App(
     auth_files=(".credentials.json",),
     prepare_use=_identity_prepare,
     post_save=_no_post_save,
+    hide_attribution=claude_hide_attribution,
+    strip_attribution=claude_strip_attribution,
+    empty_content="{}",
 )
 
 APPS = {"codex": CODEX, "claude": CLAUDE}
